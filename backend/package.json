@@ -1,0 +1,17 @@
+{
+  "name": "nfc-pass-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend for the closed-loop pre-funded NFC pass ecosystem: funds wallets via Open Banking and issues signed Huawei Wallet passes.",
+  "main": "src/app.js",
+  "scripts": {
+    "start": "node src/app.js",
+    "dev": "node --watch src/app.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.7",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2"
+  }
+}
