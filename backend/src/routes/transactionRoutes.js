@@ -1,53 +1,71 @@
 const express = require('express');
-const { debit, getWallet } = require('../db/walletRepository');
+const { debit, getWallet, getTransactionHistory } = require('../db/walletRepository');
 const { requireFields } = require('../middleware/validateRequest');
+const { requireMerchantKey } = require('../middleware/auth');
+const { ValidationError } = require('../lib/errors');
+const logger = require('../lib/logger');
+const { v4: uuidv4 } = require('uuid');
 
 const router = express.Router();
 
 /**
- * POST /api/transaction/deduct
- * body: { serialNumber, amount }
+ * POST /api/v1/transactions/deduct
+ * Headers: X-Api-Key (merchant key)
+ * body: { serialNumber, amount, merchantId? }
  *
- * Called by the merchant POS app after a successful NFC tap + SELECT AID
- * handshake. Atomically debits the balance — the DB transaction ensures no
- * double-spend even under concurrent tap events.
+ * Atomically debits the pass balance. Protected by merchant API key auth.
+ * The SQLite transaction prevents double-spend under concurrent taps.
  */
 router.post(
-  '/api/transaction/deduct',
+  '/api/v1/transactions/deduct',
+  requireMerchantKey,
   requireFields('serialNumber', 'amount'),
-  (req, res) => {
-    const { serialNumber, amount } = req.body;
+  (req, res, next) => {
+    const { serialNumber, amount, merchantId } = req.body;
 
     if (typeof amount !== 'number' || amount <= 0) {
-      return res.status(400).json({ error: 'amount must be a positive number' });
+      return next(new ValidationError('amount must be a positive number'));
     }
 
-    const wallet = getWallet(serialNumber);
-    if (!wallet) {
-      return res.status(404).json({ error: 'Wallet not found' });
-    }
+    try {
+      const reference = `TAP-${uuidv4()}`;
+      const { newBalance } = debit(serialNumber, amount, merchantId || null, reference);
 
-    const result = debit(serialNumber, amount, `POS-TAP-${Date.now()}`);
-    if (!result.success) {
-      return res
-        .status(402)
-        .json({ error: 'Insufficient balance', currentBalance: wallet.balance });
-    }
+      logger.info('Debit successful', { serialNumber, amount, newBalance });
 
-    return res.json({ serialNumber, deducted: amount, newBalance: result.newBalance });
+      return res.json({ serialNumber, deducted: amount, newBalance, reference });
+    } catch (err) {
+      next(err);
+    }
   }
 );
 
 /**
- * GET /api/wallet/:serialNumber
- * Returns current wallet balance — useful for the merchant receipt screen.
+ * GET /api/v1/wallets/:serialNumber
+ * Returns the wallet's current state (balance, status).
  */
-router.get('/api/wallet/:serialNumber', (req, res) => {
-  const wallet = getWallet(req.params.serialNumber);
-  if (!wallet) {
-    return res.status(404).json({ error: 'Wallet not found' });
+router.get('/api/v1/wallets/:serialNumber', (req, res, next) => {
+  try {
+    const wallet = getWallet(req.params.serialNumber);
+    return res.json(wallet);
+  } catch (err) {
+    next(err);
   }
-  return res.json(wallet);
+});
+
+/**
+ * GET /api/v1/wallets/:serialNumber/transactions?limit=20
+ * Returns the transaction history for a wallet — used by the consumer app
+ * receipt / history screen.
+ */
+router.get('/api/v1/wallets/:serialNumber/transactions', (req, res, next) => {
+  try {
+    const limit = Math.min(parseInt(req.query.limit || '20', 10), 100);
+    const history = getTransactionHistory(req.params.serialNumber, limit);
+    return res.json({ serialNumber: req.params.serialNumber, transactions: history });
+  } catch (err) {
+    next(err);
+  }
 });
 
 module.exports = router;

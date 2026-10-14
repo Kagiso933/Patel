@@ -1,72 +1,103 @@
+const { v4: uuidv4 } = require('uuid');
 const db = require('./database');
+const { NotFoundError, InsufficientBalanceError } = require('../lib/errors');
 
 const stmts = {
-  upsertWallet: db.prepare(`
-    INSERT INTO wallets (serial_number, holder_name, balance)
-    VALUES (@serialNumber, @holderName, @balance)
+  upsert: db.prepare(`
+    INSERT INTO wallets (serial_number, holder_name, holder_email, balance)
+    VALUES (@serialNumber, @holderName, @holderEmail, @balance)
     ON CONFLICT(serial_number) DO UPDATE SET
-      balance    = excluded.balance,
-      updated_at = unixepoch()
+      holder_name  = excluded.holder_name,
+      holder_email = excluded.holder_email,
+      updated_at   = unixepoch()
   `),
 
-  getWallet: db.prepare(
-    `SELECT * FROM wallets WHERE serial_number = ?`
-  ),
-
-  credit: db.prepare(`
-    UPDATE wallets
-    SET balance = balance + @amount, updated_at = unixepoch()
-    WHERE serial_number = @serialNumber
-  `),
+  get: db.prepare(`SELECT * FROM wallets WHERE serial_number = ?`),
 
   debit: db.prepare(`
     UPDATE wallets
-    SET balance = balance - @amount, updated_at = unixepoch()
-    WHERE serial_number = @serialNumber AND balance >= @amount
+    SET balance    = balance - @amount,
+        updated_at = unixepoch()
+    WHERE serial_number = @serialNumber AND balance >= @amount AND status = 'active'
+  `),
+
+  credit: db.prepare(`
+    UPDATE wallets
+    SET balance    = balance + @amount,
+        updated_at = unixepoch()
+    WHERE serial_number = @serialNumber AND status = 'active'
   `),
 
   logTx: db.prepare(`
-    INSERT INTO transactions (serial_number, type, amount, reference)
-    VALUES (@serialNumber, @type, @amount, @reference)
+    INSERT INTO transactions
+      (id, serial_number, merchant_id, type, amount, balance_after, reference)
+    VALUES
+      (@id, @serialNumber, @merchantId, @type, @amount, @balanceAfter, @reference)
+  `),
+
+  history: db.prepare(`
+    SELECT * FROM transactions
+    WHERE serial_number = ?
+    ORDER BY created_at DESC
+    LIMIT ?
   `),
 };
 
-/**
- * Creates or resets a wallet row when a new pass is issued.
- */
-function upsertWallet(serialNumber, holderName, balance) {
-  stmts.upsertWallet.run({ serialNumber, holderName, balance });
+function upsertWallet({ serialNumber, holderName, holderEmail = null, balance }) {
+  stmts.upsert.run({ serialNumber, holderName, holderEmail, balance });
+  return stmts.get.get(serialNumber);
 }
 
-/**
- * Returns the wallet row, or null if not found.
- */
 function getWallet(serialNumber) {
-  return stmts.getWallet.get(serialNumber) ?? null;
+  const wallet = stmts.get.get(serialNumber);
+  if (!wallet) throw new NotFoundError(`Wallet ${serialNumber}`);
+  return wallet;
 }
 
-/**
- * Atomically debits `amount` from the wallet.
- * Returns { success, newBalance } — success is false when balance is insufficient.
- */
-const debit = db.transaction((serialNumber, amount, reference) => {
+const debit = db.transaction((serialNumber, amount, merchantId, reference) => {
+  const before = stmts.get.get(serialNumber);
+  if (!before) throw new NotFoundError(`Wallet ${serialNumber}`);
+  if (before.balance < amount) {
+    throw new InsufficientBalanceError(before.balance, amount);
+  }
+
   const result = stmts.debit.run({ serialNumber, amount });
   if (result.changes === 0) {
-    return { success: false };
+    // Race or suspended wallet
+    throw new InsufficientBalanceError(before.balance, amount);
   }
-  stmts.logTx.run({ serialNumber, type: 'debit', amount, reference });
-  const wallet = stmts.getWallet.get(serialNumber);
-  return { success: true, newBalance: wallet.balance };
+
+  const after = stmts.get.get(serialNumber);
+  stmts.logTx.run({
+    id: uuidv4(),
+    serialNumber,
+    merchantId: merchantId || null,
+    type: 'debit',
+    amount,
+    balanceAfter: after.balance,
+    reference,
+  });
+
+  return { newBalance: after.balance };
 });
 
-/**
- * Credits `amount` to the wallet (used when funding via Stitch).
- */
 const credit = db.transaction((serialNumber, amount, reference) => {
   stmts.credit.run({ serialNumber, amount });
-  stmts.logTx.run({ serialNumber, type: 'credit', amount, reference });
-  const wallet = stmts.getWallet.get(serialNumber);
-  return { newBalance: wallet.balance };
+  const after = stmts.get.get(serialNumber);
+  stmts.logTx.run({
+    id: uuidv4(),
+    serialNumber,
+    merchantId: null,
+    type: 'credit',
+    amount,
+    balanceAfter: after.balance,
+    reference,
+  });
+  return { newBalance: after.balance };
 });
 
-module.exports = { upsertWallet, getWallet, debit, credit };
+function getTransactionHistory(serialNumber, limit = 20) {
+  return stmts.history.all(serialNumber, limit);
+}
+
+module.exports = { upsertWallet, getWallet, debit, credit, getTransactionHistory };

@@ -4,21 +4,30 @@ plugins {
 }
 
 android {
-    namespace 'com.example.consumer'
+    namespace 'com.rynotec.pass'
     compileSdk 34
 
     defaultConfig {
-        applicationId "com.example.consumer"
-        minSdk 24
-        targetSdk 34
-        versionCode 1
-        versionName "1.0"
+        applicationId "com.rynotec.pass"
+        minSdk        26
+        targetSdk     34
+        versionCode   2
+        versionName   "2.0.0"
+
+        buildConfigField 'String', 'BACKEND_URL', '"https://api.ryno-tec.co.za"'
     }
 
+    buildFeatures { buildConfig true }
+
     buildTypes {
+        debug {
+            buildConfigField 'String', 'BACKEND_URL', '"http://10.0.2.2:3000"'
+        }
         release {
-            minifyEnabled true
-            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+            minifyEnabled   true
+            shrinkResources true
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'),
+                          'proguard-rules.pro'
         }
     }
 
@@ -26,22 +35,15 @@ android {
         sourceCompatibility JavaVersion.VERSION_17
         targetCompatibility JavaVersion.VERSION_17
     }
-
-    kotlinOptions {
-        jvmTarget = '17'
-    }
+    kotlinOptions { jvmTarget = '17' }
 }
 
 dependencies {
-    // HMS Core — must be installed on the device for Wallet Kit to work.
-    // Check https://developer.huawei.com/consumer/en/doc/development/HMSCore-Guides
-    // for the latest release number.
+    // HMS Core — Wallet Kit; verify version against AppGallery Connect SDK download
     implementation 'com.huawei.hms:base:6.11.0.302'
     implementation 'com.huawei.hms:wallet:6.11.0.302'
 
-    // Backend API calls (PassApiClient)
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-
     implementation 'androidx.appcompat:appcompat:1.7.0'
     implementation 'com.google.android.material:material:1.12.0'
 }

@@ -1,9 +1,8 @@
-// Lightweight body-validation middleware so routes don't each repeat the
-// same guard clauses.
+const { ValidationError } = require('../lib/errors');
 
 /**
- * Returns a middleware that checks required fields are present in req.body
- * and rejects with 400 if any are missing.
+ * Middleware factory — rejects with 400 when any listed field is absent
+ * from req.body. Chains cleanly with the central error handler.
  */
 function requireFields(...fields) {
   return (req, res, next) => {
@@ -11,9 +10,9 @@ function requireFields(...fields) {
       (f) => req.body[f] === undefined || req.body[f] === null
     );
     if (missing.length) {
-      return res
-        .status(400)
-        .json({ error: `Missing required fields: ${missing.join(', ')}` });
+      return next(
+        new ValidationError(`Missing required fields: ${missing.join(', ')}`)
+      );
     }
     next();
   };
