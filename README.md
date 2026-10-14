@@ -1,66 +1,137 @@
-# Closed-Loop Pre-Funded NFC Pass
+# Ryno-Tec NFC Pass Platform
 
-Foundational code for a three-part NFC loyalty pass ecosystem built around
-HMS Wallet Kit, bypassing EMV certification by treating the pass as a
-closed-loop reader/applet system rather than a card-network transaction.
+**Closed-Loop Pre-Funded NFC Wallet — South African Market**
+
+A three-module ecosystem that lets South African consumers load value via
+Open Banking (Stitch instant EFT) onto a signed Huawei Wallet pass, then
+tap to pay at a Ryno-Tec merchant terminal — all without EMV certification.
+
+---
+
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│  Consumer                                                   │
+│  ┌──────────────────┐   POST /api/v1/passes                 │
+│  │  Ryno-Tec Pass   │──────────────────────► Backend        │
+│  │  (Android/Huawei)│◄──────── signed JWT ─── Node/Express  │
+│  └────────┬─────────┘                        SQLite         │
+│           │ HMS Wallet SDK                   Stitch EFT     │
+│           ▼                                                  │
+│  ┌──────────────────┐                                       │
+│  │  Huawei Wallet   │──── auto-mirrors ────► HarmonyOS watch│
+│  └──────────────────┘                                       │
+└─────────────────────────────────────────────────────────────┘
+             │ NFC tap (ISO-DEP / ISO 7816-4)
+             ▼
+┌─────────────────────────────────────────────────────────────┐
+│  Merchant POS                                               │
+│  ┌──────────────────┐   SELECT AID APDU                    │
+│  │  Ryno-Tec POS    │◄─────────────────── Pass applet      │
+│  │  (Android tablet)│   90 00 + serial                     │
+│  └────────┬─────────┘                                       │
+│           │ POST /api/v1/transactions/deduct + X-Api-Key    │
+│           ▼                                                  │
+│         Backend — atomic SQLite debit → receipt             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+---
 
 ## Modules
 
-### 1. `backend/` — Node.js / Express
-Funds wallets via Open Banking and issues signed loyalty passes.
+### `backend/` — Node.js / Express (Enterprise)
 
-- `src/routes/passRoutes.js` — `POST /api/pass/generate`, orchestrates the
-  flow below.
-- `src/services/huaweiAuthService.js` — OAuth2 client-credentials token
-  fetch/cache against Huawei's token endpoint.
-- `src/services/walletPassService.js` — builds the `loyaltyinstance`
-  payload (including `nfcProps`, the data the merchant POS reads over
-  NFC) and signs it with the developer's RSA private key. See the comment
-  in that file for a note on Huawei's "JWE" terminology.
-- `src/routes/transactionRoutes.js` — `POST /api/transaction/deduct`,
-  a minimal in-memory balance store the merchant app calls after a
-  successful tap.
+| Feature | Detail |
+|---|---|
+| Routes | `POST /api/v1/passes` · `POST /api/v1/transactions/deduct` · `GET /api/v1/wallets/:sn` · `GET /api/v1/wallets/:sn/transactions` · `GET /health` |
+| Auth | Merchant API key via `X-Api-Key` header |
+| Security | Helmet headers · Rate limiting (10 rpm passes / 120 rpm deducts) |
+| Database | SQLite (better-sqlite3, WAL mode, atomic debit transaction, full TX log) |
+| Logging | Winston (JSON in prod, coloured in dev) |
+| Open Banking | Stitch instant EFT (stitchFundingService) |
+| Pass signing | RS256 JWT — `walletPassService` (see note below) |
+| Docker | `Dockerfile` + `docker-compose.yml` with health check |
 
-Setup:
-```
+> **JWT / JWE note:** Huawei's docs call the artifact a "JWE" but the wire
+> format is an RS256-signed JWT (a JWS). True JWE encrypts to a public key;
+> signing with a private key produces a JWS. The implementation follows
+> the actual Huawei Wallet Kit wire format.
+
+**Quick start:**
+```bash
 cd backend
-cp .env.example .env   # fill in Huawei/AGC credentials + signing key
+cp .env.example .env   # fill in credentials
 npm install
-npm start
+npm run dev
 ```
 
-### 2. `consumer-app/` — Kotlin (Android, HMS Core)
-`AddToWalletManager` takes the JWE/JWT from `/api/pass/generate` and pushes
-it into Huawei Wallet via `WalletPassClient`, including an HMS
-availability check. A successful push auto-mirrors to any paired
-HarmonyOS watch.
+**Docker:**
+```bash
+docker compose up --build
+```
 
-### 3. `merchant-pos-app/` — Kotlin (Android, standard NFC APIs)
-The POS reader. Drop these files into an Android app module:
+---
 
-- `nfc/ApduCommands.kt` — builds the SELECT AID APDU
-  (`00 A4 04 00 05 F2 22 22 22 22 00`) targeting AID `F222222222`.
-- `nfc/NfcReaderManager.kt` — `NfcAdapter.enableReaderMode()` with
-  `FLAG_READER_NFC_A | FLAG_READER_SKIP_NDEF_CHECK`, connects via
-  `IsoDep`, sends the SELECT AID command, verifies the response ends in
-  `90 00`, and extracts the serial number from the payload.
-- `api/TransactionApiClient.kt` — posts `{ serialNumber, amount }` to
-  `/api/transaction/deduct`.
-- `pos/PosTransactionController.kt` — wires the above together
-  (`onResume`/`onPause` lifecycle hooks), deducting a fixed R45.00 per
-  tap as a simulation.
+### `consumer-app/` — Kotlin, Android (HMS)
 
-These are source files, not full Gradle modules — add them to an existing
-Android project's `app/src/main/java/...` tree and declare the
-`android.permission.NFC` permission plus the OkHttp/HMS Wallet Kit
-dependencies each file imports.
+| Class | Responsibility |
+|---|---|
+| `PassApiClient` | Calls `POST /api/v1/passes`, returns typed `WalletPass` |
+| `HuaweiWalletManager` | HMS Core availability check + `WalletPassClient.createWalletPass()` |
+| `PassViewModel` | Composes fetch → add-to-wallet with progress callbacks |
 
-## Flow
+Pass auto-mirrors to any paired HarmonyOS smartwatch after a successful push.
 
-1. Backend funds a wallet (Open Banking) and signs a pass →
-   `backend`.
-2. Consumer app adds that pass to Huawei Wallet, which mirrors to the
-   watch → `consumer-app`.
-3. At checkout, the watch/phone taps the merchant tablet; the POS app
-   reads the pass over NFC and deducts the balance server-side →
-   `merchant-pos-app`.
+---
+
+### `merchant-pos-app/` — Kotlin, Android (standard NFC APIs)
+
+| Class | Responsibility |
+|---|---|
+| `ApduCommands` | Builds `SELECT AID` APDU (`00 A4 04 00 05 F2 22 22 22 22 00`) |
+| `NfcReaderManager` | `enableReaderMode` + ISO-DEP handshake + payload extraction |
+| `TransactionApiClient` | `POST /api/v1/transactions/deduct` with `X-Api-Key` |
+| `PosViewModel` | Tap → deduct → typed `TransactionResult` |
+| `PosActivity` | Full-screen POS UI with colour-coded state (green/red/blue) |
+
+---
+
+## APDU Reference
+
+```
+00 A4 04 00 05 F2 22 22 22 22 00
+│  │  │  │  │  └─── AID (5 bytes) ───┘ │
+│  │  │  │  Lc=5                        Le=0 (any length)
+│  │  │  P2=0x00 (first occurrence)
+│  │  P1=0x04 (select by name)
+│  INS=0xA4 (SELECT)
+CLA=0x00 (standard, no secure messaging)
+```
+
+Success response ends in `90 00`. Payload bytes before `90 00` are the
+UTF-8 encoded pass serial number.
+
+---
+
+## Branch Strategy
+
+```
+main          ← release
+  └── develop ← integration
+        ├── feature/backend-pass-generation
+        ├── feature/consumer-app-wallet
+        ├── feature/merchant-pos-nfc-reader
+        └── feature/ryno-tec-rebrand   ← this branch
+```
+
+---
+
+## Checklist Before First Device Test
+
+- [ ] Fill `backend/.env` with real Huawei AGC + Stitch credentials
+- [ ] Set `MERCHANT_API_KEY` to a strong random secret
+- [ ] Verify HMS Wallet Kit SDK version in `consumer-app/build.gradle`
+- [ ] Replace `BuildConfig.BACKEND_URL` debug value with LAN IP for physical device testing
+- [ ] Point `docker-compose.yml` data volume to a persistent host path
