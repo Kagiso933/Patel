@@ -4,7 +4,7 @@ name: Checks
 # (high or worse), and no secrets are committed. Card data never belongs in this repo.
 on:
   push:
-    branches: [main]
+    branches: ["**"]   # every branch: work happens on feature branches here
   pull_request:
 
 permissions:
